@@ -3,7 +3,10 @@ use clap::{Parser, Subcommand};
 
 #[cfg(feature = "cli")]
 #[derive(Parser)]
-#[command(name = "matrix-bridge", about = "E2EE Matrix bridge — CLI and MCP server")]
+#[command(
+    name = "matrix-bridge",
+    about = "E2EE Matrix bridge — CLI and MCP server"
+)]
 pub struct Cli {
     /// Output in JSON format
     #[arg(long, global = true)]
@@ -18,6 +21,9 @@ pub struct Cli {
 pub enum Commands {
     /// Interactive setup: login, create device, save config
     Setup,
+
+    /// Restore historical room keys from the account's server-side backup
+    Recover,
 
     /// Send a message to a room
     Send {
@@ -46,6 +52,13 @@ pub enum Commands {
         /// Number of messages (1-100)
         #[arg(short, long, default_value = "10", value_parser = clap::value_parser!(u32).range(1..=100))]
         limit: u32,
+    },
+
+    /// Read all messages from all rooms since a cutoff time
+    Recent {
+        /// Cutoff: RFC 3339 timestamp or YYYY-MM-DD date (default: last 24 hours)
+        #[arg(long)]
+        since: Option<String>,
     },
 
     /// List joined rooms

@@ -20,8 +20,8 @@ With matrix-bridge, your coding agent can:
 ## Features
 
 - **End-to-end encryption** — automatic encrypt/decrypt using vodozemac (pure Rust Olm)
-- **CLI** — `matrix-bridge send`, `read`, `rooms`, `send-wait`, `setup`, `config`
-- **MCP server** — 5 tools exposed over stdio for any MCP client
+- **CLI** — `matrix-bridge send`, `read`, `recent`, `rooms`, `send-wait`, `setup`, `config`
+- **MCP server** — 6 tools exposed over stdio for any MCP client
 - **Agent-agnostic** — no hardcoded bot names or provider assumptions
 - **Static binaries** — no Python, no venv, no libolm
 - **Cross-platform** — Linux (x86/ARM), macOS (Intel/Apple Silicon). Windows support planned.
@@ -42,14 +42,22 @@ cargo build --release
 
 ### 1. Create a Matrix account
 
-You need a Matrix account for the bridge. Create one at [element.io](https://app.element.io) or any Matrix homeserver, then note your user ID (e.g., `@mybot:matrix.org`) and password.
+You need a Matrix account for the bridge. Create one at [element.io](https://app.element.io) or any Matrix homeserver, then note your user ID (e.g., `@mybot:matrix.org`).
 
 ### 2. Setup
 
 ```bash
 matrix-bridge setup
-# Enter your Matrix user ID and password when prompted
+# Enter your Matrix user ID; setup offers SSO and password when supported
 # This creates encryption keys and saves your session
+```
+
+If this is a new device and you need older encrypted messages, restore the
+account's room-key backup. The recovery key or passphrase is read locally and
+is not saved by the bridge:
+
+```bash
+matrix-bridge recover
 ```
 
 ### 3. Configure a default room
@@ -70,6 +78,9 @@ matrix-bridge send "Hello from the bridge!"
 # Read recent messages
 matrix-bridge read --limit 10
 
+# Read today's messages across all rooms
+matrix-bridge recent --since 2026-09-29
+
 # Send and wait for a reply (30s timeout)
 matrix-bridge send-wait "ping" --timeout 30
 ```
@@ -78,6 +89,7 @@ matrix-bridge send-wait "ping" --timeout 30
 
 ```
 matrix-bridge setup                  Interactive login + key setup
+matrix-bridge recover                Restore keys from the server backup
 matrix-bridge send <msg>             Send a message
   --room <id>                        Room ID (overrides default)
   --mention <@user:server>           @mention a user
@@ -85,6 +97,8 @@ matrix-bridge send <msg>             Send a message
 matrix-bridge read                   Read recent messages
   --room <id>                        Room ID (overrides default)
   --limit <n>                        Number of messages (1-100, default 10)
+matrix-bridge recent                 Read all messages from all rooms since a cutoff
+  --since <ts>                       RFC 3339 timestamp or YYYY-MM-DD (default: last 24h)
 matrix-bridge rooms                  List joined rooms
 matrix-bridge send-wait <msg>        Send and wait for reply
   --room <id>                        Room ID (overrides default)
@@ -101,13 +115,14 @@ All commands support `--json` for machine-readable output.
 
 ## MCP server
 
-The MCP server exposes 5 tools over stdin/stdout:
+The MCP server exposes 6 tools over stdin/stdout:
 
 | Tool | Description |
 |------|-------------|
 | `send_message` | Send a message to a room (auto-encrypted) |
 | `send_and_wait` | Send and wait for a reply with timeout |
-| `read_messages` | Read recent messages (auto-decrypted) |
+| `read_messages` | Read recent messages from one room (auto-decrypted) |
+| `read_recent_messages` | Read ALL messages from all rooms since a cutoff (default: last 24h), no trimming |
 | `list_rooms` | List joined rooms |
 | `join_room` | Join a room by ID or alias |
 
@@ -240,13 +255,11 @@ Config lives at `~/.matrix-bridge/config.json` (created by `matrix-bridge setup`
 
 ## Troubleshooting
 
-**All messages show as "[encrypted — unable to decrypt]"**
+**Messages show as "[encrypted — unable to decrypt]"**
 
-This means the bridge doesn't have the Megolm session keys for those messages. This happens when:
-- You're reading messages sent before the bridge device was created — these can never be decrypted
-- You need to run `matrix-bridge setup` to create a fresh device with proper key exchange
+This means the bridge doesn't currently have the Megolm session keys for those messages. If the account has a server-side room-key backup, run `matrix-bridge recover` and enter its recovery key or passphrase. The bridge then requests missing room keys when you read messages.
 
-Messages sent *after* setup will decrypt normally.
+If there is no backup, the existing Element device must share/export the room keys. Re-running `setup` creates another device but does not restore historical keys.
 
 **"crypto store doesn't match" error during setup**
 

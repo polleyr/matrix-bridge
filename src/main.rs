@@ -43,6 +43,7 @@ async fn run_command(cli: cli::Cli) -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Setup => cmd_setup().await?,
+        Commands::Recover => cmd_recover().await?,
         Commands::Send {
             message,
             room,
@@ -50,6 +51,7 @@ async fn run_command(cli: cli::Cli) -> anyhow::Result<()> {
             no_mention,
         } => cmd_send(&message, room, mention, no_mention, cli.json).await?,
         Commands::Read { room, limit } => cmd_read(room, limit, cli.json).await?,
+        Commands::Recent { since } => cmd_recent(since, cli.json).await?,
         Commands::Rooms => cmd_rooms(cli.json).await?,
         Commands::SendWait {
             message,
@@ -63,6 +65,32 @@ async fn run_command(cli: cli::Cli) -> anyhow::Result<()> {
         Commands::McpServer => mcp::run_server().await?,
     }
 
+    Ok(())
+}
+
+#[cfg(feature = "cli")]
+async fn cmd_recover() -> anyhow::Result<()> {
+    let config = Config::load()?;
+    let mut client = MatrixBridgeClient::restore(&config).await?;
+    client.sync_once().await?;
+
+    if !client.has_key_backup().await? {
+        anyhow::bail!("No room-key backup is available on the homeserver");
+    }
+
+    let recovery_key = rpassword::prompt_password("Matrix recovery key or passphrase: ")?;
+    if recovery_key.trim().is_empty() {
+        anyhow::bail!("Recovery key or passphrase cannot be empty");
+    }
+
+    if !client.recover_key_backup(&recovery_key).await? {
+        anyhow::bail!(
+            "Recovery secrets were imported, but they did not unlock the room-key backup. \
+             Check that this is the recovery key or passphrase for the active backup."
+        );
+    }
+
+    println!("Room-key backup unlocked. The bridge will fetch missing keys as messages are read.");
     Ok(())
 }
 
@@ -83,9 +111,7 @@ async fn cmd_setup() -> anyhow::Result<()> {
     let server = user_id.split(':').nth(1).unwrap();
     let homeserver = format!("https://{}", server);
 
-    let password = rpassword::prompt_password(format!("Password for {}: ", user_id))?;
-
-    let config = Config {
+    let mut config = Config {
         homeserver,
         user_id,
         device_name: "matrix-bridge".to_string(),
@@ -99,8 +125,37 @@ async fn cmd_setup() -> anyhow::Result<()> {
         notify_on_mention: None,
     };
 
-    let client = MatrixBridgeClient::login_with_password(&config, &password).await?;
+    let login_types = MatrixBridgeClient::supported_login_types(&config).await?;
+    let supports_sso = login_types.iter().any(|kind| kind == "m.login.sso");
+    let supports_password = login_types.iter().any(|kind| kind == "m.login.password");
 
+    let use_sso = match (supports_sso, supports_password) {
+        (true, true) => loop {
+            print!("Login method [s] SSO (recommended) / [p] password (default: SSO): ");
+            io::stdout().flush()?;
+            let mut method = String::new();
+            io::stdin().read_line(&mut method)?;
+            match method.trim().to_ascii_lowercase().as_str() {
+                "" | "s" | "sso" => break true,
+                "p" | "password" => break false,
+                _ => eprintln!("Choose SSO or password."),
+            }
+        },
+        (true, false) => true,
+        (false, true) => false,
+        (false, false) => {
+            anyhow::bail!("The homeserver advertises no supported login flow (password or SSO).")
+        }
+    };
+
+    let client = if use_sso {
+        MatrixBridgeClient::login_with_sso(&config).await?
+    } else {
+        let password = rpassword::prompt_password(format!("Password for {}: ", config.user_id))?;
+        MatrixBridgeClient::login_with_password(&config, &password).await?
+    };
+
+    config.user_id = config::Credentials::load(&config)?.user_id;
     config.save()?;
     println!("Setup complete. Session saved.");
 
@@ -155,6 +210,28 @@ async fn cmd_read(room: Option<String>, limit: u32, json: bool) -> anyhow::Resul
     let messages = client.read_messages(&room_id, limit).await?;
 
     println!("{}", format::format_messages(&messages, json));
+    Ok(())
+}
+
+#[cfg(feature = "cli")]
+async fn cmd_recent(since: Option<String>, json: bool) -> anyhow::Result<()> {
+    let config = Config::load()?;
+    let mut client = MatrixBridgeClient::restore(&config).await?;
+    client.sync_once().await?;
+
+    let since_ms = match since {
+        Some(s) => client::parse_since_cutoff(&s).ok_or_else(|| {
+            anyhow::anyhow!(
+                "invalid since value '{s}': expected an RFC 3339 timestamp \
+                 (e.g. 2026-09-29T09:00:00+02:00) or a date (e.g. 2026-09-29)"
+            )
+        })?,
+        None => client::default_since_ms(),
+    };
+
+    let rooms = client.read_recent_messages(since_ms).await;
+
+    println!("{}", format::format_recent_rooms(&rooms, json));
     Ok(())
 }
 
@@ -249,11 +326,7 @@ fn resolve_room(config: &Config, room: Option<String>) -> anyhow::Result<String>
 }
 
 #[cfg(feature = "cli")]
-fn resolve_mention(
-    config: &Config,
-    mention: Option<String>,
-    no_mention: bool,
-) -> Option<String> {
+fn resolve_mention(config: &Config, mention: Option<String>, no_mention: bool) -> Option<String> {
     if no_mention {
         None
     } else {

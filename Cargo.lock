@@ -1837,6 +1837,7 @@ dependencies = [
  "rpassword",
  "schemars",
  "serde",
+ "serde_html_form",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",

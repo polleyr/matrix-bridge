@@ -17,7 +17,11 @@ pub async fn apply_trust_policy(client: &Client, mode: &TrustMode) {
             // Verify devices of all tracked users
             let encryption = client.encryption();
             for room in client.rooms() {
-                for member in room.members_no_sync(matrix_sdk::RoomMemberships::ACTIVE).await.unwrap_or_default() {
+                for member in room
+                    .members_no_sync(matrix_sdk::RoomMemberships::ACTIVE)
+                    .await
+                    .unwrap_or_default()
+                {
                     if member.user_id() == user_id {
                         continue;
                     }

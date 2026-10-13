@@ -1,10 +1,9 @@
 use crate::client::MatrixBridgeClient;
 use rmcp::{
-    ServerHandler, ServiceExt, tool, tool_router,
-    handler::server::router::{Router, tool::ToolRouter},
+    handler::server::router::{tool::ToolRouter, Router},
     handler::server::wrapper::{Json, Parameters},
     model::{ServerCapabilities, ServerInfo},
-    schemars,
+    schemars, tool, tool_router, ServerHandler, ServiceExt,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -45,11 +44,18 @@ pub struct SendAndWaitParams {
     pub mention: Option<String>,
     /// Timeout in seconds (default: 30)
     #[serde(default = "default_timeout")]
+    #[schemars(schema_with = "unsigned_integer_schema")]
     pub timeout: u64,
 }
 
 fn default_timeout() -> u64 {
     30
+}
+
+fn unsigned_integer_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    let mut schema = <u64 as schemars::JsonSchema>::json_schema(generator);
+    schema.remove("format");
+    schema
 }
 
 #[derive(Serialize, schemars::JsonSchema)]
@@ -64,6 +70,7 @@ pub struct MessageOutput {
     pub body: String,
     pub timestamp: String,
     pub event_id: String,
+    pub decryption_failed: bool,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -94,6 +101,7 @@ pub struct RoomOutput {
     pub room_id: String,
     pub name: Option<String>,
     pub encrypted: bool,
+    #[schemars(schema_with = "unsigned_integer_schema")]
     pub member_count: u64,
 }
 
@@ -106,6 +114,33 @@ pub struct JoinRoomParams {
 #[derive(Serialize, schemars::JsonSchema)]
 pub struct JoinRoomOutput {
     pub room_id: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ReadRecentMessagesParams {
+    /// Cutoff time as an RFC 3339 timestamp (e.g. "2026-09-29T09:00:00+02:00")
+    /// or a plain date (e.g. "2026-09-29", interpreted as local midnight).
+    /// Defaults to 24 hours ago. ALL messages newer than this are returned.
+    pub since: Option<String>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct RecentRoomOutput {
+    pub room_id: String,
+    pub room_name: Option<String>,
+    pub encrypted: bool,
+    /// Pagination for this room aborted early; older messages from the
+    /// requested window may be missing.
+    pub partial: bool,
+    pub messages: Vec<MessageOutput>,
+}
+
+#[derive(Serialize, schemars::JsonSchema)]
+pub struct ReadRecentMessagesOutput {
+    /// The cutoff that was applied, as an RFC 3339 timestamp.
+    pub since: String,
+    /// Rooms with matching messages, most recently active first.
+    pub rooms: Vec<RecentRoomOutput>,
 }
 
 // --- Tool implementations ---
@@ -155,6 +190,7 @@ impl BridgeServer {
                 body: msg.body,
                 timestamp: msg.timestamp,
                 event_id: msg.event_id,
+                decryption_failed: msg.decryption_failed,
             }),
             timed_out,
         }))
@@ -175,12 +211,12 @@ impl BridgeServer {
             .await
             .map_err(|e| e.to_string())?
             .into_iter()
-            .filter(|m| !m.decryption_failed)
             .map(|m| MessageOutput {
                 sender: m.sender,
                 body: m.body,
                 timestamp: m.timestamp,
                 event_id: m.event_id,
+                decryption_failed: m.decryption_failed,
             })
             .collect();
         Ok(Json(ReadMessagesOutput { messages }))
@@ -220,6 +256,58 @@ impl BridgeServer {
             .await
             .map_err(|e| e.to_string())?;
         Ok(Json(JoinRoomOutput { room_id }))
+    }
+
+    #[tool(
+        name = "read_recent_messages",
+        description = "Read ALL messages from all joined rooms since a cutoff time (default: last \
+            24 hours) — nothing is trimmed and there is no page cap. Each room's history is \
+            paginated backwards until the cutoff is reached, decrypting E2EE messages automatically. \
+            Returns rooms with matching messages, most recently active first, with each room's \
+            messages in chronological order. Rooms flagged `partial` hit repeated fetch failures \
+            and may be missing older messages."
+    )]
+    async fn read_recent_messages(
+        &self,
+        Parameters(params): Parameters<ReadRecentMessagesParams>,
+    ) -> std::result::Result<Json<ReadRecentMessagesOutput>, String> {
+        let client = self.client.read().await;
+
+        let since_ms = match params.since.as_deref() {
+            Some(s) => crate::client::parse_since_cutoff(s).ok_or_else(|| {
+                format!(
+                    "invalid since value '{s}': expected an RFC 3339 timestamp \
+                     (e.g. 2026-09-29T09:00:00+02:00) or a date (e.g. 2026-09-29)"
+                )
+            })?,
+            None => crate::client::default_since_ms(),
+        };
+
+        let rooms = client.read_recent_messages(since_ms).await;
+
+        Ok(Json(ReadRecentMessagesOutput {
+            since: crate::client::format_timestamp(since_ms),
+            rooms: rooms
+                .into_iter()
+                .map(|r| RecentRoomOutput {
+                    room_id: r.room_id,
+                    room_name: r.room_name,
+                    encrypted: r.encrypted,
+                    partial: r.partial,
+                    messages: r
+                        .messages
+                        .into_iter()
+                        .map(|m| MessageOutput {
+                            sender: m.sender,
+                            body: m.body,
+                            timestamp: m.timestamp,
+                            event_id: m.event_id,
+                            decryption_failed: m.decryption_failed,
+                        })
+                        .collect(),
+                })
+                .collect(),
+        }))
     }
 }
 

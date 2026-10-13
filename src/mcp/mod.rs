@@ -1,5 +1,5 @@
-pub mod tools;
 pub mod notifications;
+pub mod tools;
 
 use crate::client::MatrixBridgeClient;
 use crate::config::Config;
